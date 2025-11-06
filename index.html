@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>خريطة التوفّر — Google Sheet (مرحلة 2)</title>
+  <style>
+    :root {
+      --bg:#f6f7f9; --card:#fff; --border:#e5e7eb; --text:#111;
+      --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+    }
+    * { box-sizing:border-box }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+    header { position:sticky; top:0; z-index:100; background:var(--card); border-bottom:1px solid var(--border); }
+    .wrap { max-width:1280px; margin:0 auto; padding:16px; }
+    .brand { font-weight:700; font-size:18px; }
+    .legend { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .pill { padding:4px 10px; border:1px solid var(--border); border-radius:999px; background:#fff; font-size:13px }
+    .sw { width:14px; height:14px; display:inline-block; border-radius:3px; border:1px solid #ddd; margin-inline-start:6px }
+    main .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:12px 0 16px }
+    .btn { appearance:none; border:1px solid var(--border); background:#fff; border-radius:10px; padding:9px 14px; cursor:pointer; font-weight:600 }
+    .btn:hover { background:#fafafa }
+    #status { font-size:13px; color:#555; }
+    #svg-container { background:var(--card); border:1px solid var(--border); border-radius:14px; overflow:auto; padding:10px; }
+    .note { font-size:12px; color:#666; margin-top:8px }
+    /* Toast */
+    .toast { position:fixed; inset-inline:0; top:12px; display:flex; justify-content:center; pointer-events:none; z-index:200 }
+    .toast > div { pointer-events:auto; background:#eaffea; color:#064e3b; border:1px solid #b7efc5; padding:10px 14px; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.08); font-size:14px; opacity:0; transform:translateY(-10px); transition:opacity .25s, transform .25s }
+    .toast.show > div { opacity:1; transform:translateY(0) }
+    /* Glow Animation: color comes from --flash variable per unit */
+    @keyframes glow {
+      0%   { filter:none; }
+      35%  { filter: drop-shadow(0 0 18px var(--flash)); }
+      70%  { filter: drop-shadow(0 0 10px var(--flash)); }
+      100% { filter:none; }
+    }
+    .flash rect, .flash path, .flash polygon, .flash ellipse, .flash circle {
+      animation: glow 1200ms ease-out 1;
+    }
+    svg .unit-info { font-size:11px; fill:#111; pointer-events:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="brand">خريطة الوحدات — قراءة من Google Sheet (مرحلة 2)</div>
+      <div class="legend" aria-hidden="true">
+        <span class="pill">Available <span class="sw" style="background:#4CAF50"></span></span>
+        <span class="pill">Sold <span class="sw" style="background:#F44336"></span></span>
+        <span class="pill">Reserved <span class="sw" style="background:#FFC107"></span></span>
+        <span class="pill">Unavailable <span class="sw" style="background:#9E9E9E"></span></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="toolbar">
+      <button id="reload" class="btn">🔄 Reload Data</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+    <div id="svg-container" aria-label="خريطة التوفّر"></div>
+    <p class="note">المصدر: Google Sheet (A=رقم، B=مساحة، C=حالة). التخزين الأوفلاين مفعّل تلقائيًا.</p>
+  </main>
+
+  <div class="toast" id="toast"><div>✅ تم التحديث بنجاح</div></div>
+
+  <script>
+    const SHEET_ID = "1UMe3I3lxYwlkDx1LWSXYEnydDj38E_606DAzIn_P9_4";
+    const GID = "0"; // عدّلها إذا كانت الورقة ليست الأولى
+    const SHEET_CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
+
+    const STATUS_COLORS = {
+      "Available": "#4CAF50",
+      "Sold": "#F44336",
+      "Reserved": "#FFC107",
+      "Unavailable": "#9E9E9E"
+    };
+
+    const LS_KEY = "availabilityMap:lastCSV";
+    const $status = document.getElementById("status");
+    const $reload = document.getElementById("reload");
+    const $container = document.getElementById("svg-container");
+    const $toast = document.getElementById("toast");
+
+    // previous state to detect changes (so we can glow)
+    const prevState = new Map();
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      await loadSVG();
+      await refreshData();
+    });
+
+    $reload.addEventListener("click", async () => { await refreshData(true); });
+
+    function showToast(msg) {
+      $toast.querySelector('div').textContent = msg;
+      $toast.classList.add('show');
+      setTimeout(() => $toast.classList.remove('show'), 3000);
+    }
+
+    async function loadSVG(){
+      try{
+        const r = await fetch("floorplan.svg", { cache: "no-store" });
+        const svgText = await r.text();
+        $container.innerHTML = svgText;
+      }catch(e){
+        $container.innerHTML = "<p style='color:#c00;padding:12px'>تعذر تحميل الخريطة (SVG).</p>";
+      }
+    }
+
+    async function refreshData(forceNetwork=false){
+      setStatus("جارِ تحديث البيانات…");
+      try{
+        let csvText = null;
+        if (!forceNetwork) csvText = await tryFetchCSV(SHEET_CSV_URL);
+        if (forceNetwork || !csvText) csvText = await fetchCSV(SHEET_CSV_URL);
+        if (csvText) {
+          localStorage.setItem(LS_KEY, csvText);
+          applyFromCSV(csvText);
+          setStatus("تم التحديث من الشيت.");
+          showToast("✅ تم التحديث بنجاح");
+          return;
+        }
+      }catch(e){
+        console.warn(e);
+      }
+      const cached = localStorage.getItem(LS_KEY);
+      if (cached) {
+        applyFromCSV(cached);
+        setStatus("أوفلاين: تم التحميل من النسخة المخزنة.");
+        showToast("📦 عرض أوفلاين");
+      } else {
+        setStatus("لا توجد بيانات متاحة.");
+      }
+    }
+
+    function setStatus(t){ $status.textContent = t; }
+
+    async function tryFetchCSV(url){ try { return await fetchCSV(url); } catch(e) { return null; } }
+    async function fetchCSV(url){
+      const r = await fetch(url, { cache: "no-store" });
+      if(!r.ok) throw new Error("CSV fetch failed");
+      return await r.text();
+    }
+
+    function parseCSV(csvText){
+      // robust-ish CSV parser (quotes support)
+      const rows = [];
+      let row = [], i = 0, val = "", inQuotes = false;
+      function pushVal(){ row.push(val); val=""; }
+      function pushRow(){ rows.push(row); row=[]; }
+      while(i < csvText.length){
+        const c = csvText[i];
+        if (inQuotes){
+          if (c === '"'){ if (csvText[i+1] === '"'){ val += '"'; i++; } else inQuotes = false; }
+          else val += c;
+        } else {
+          if (c === '"') inQuotes = true;
+          else if (c === ',') pushVal();
+          else if (c === '\n') { pushVal(); pushRow(); }
+          else val += c;
+        }
+        i++;
+      }
+      pushVal(); pushRow();
+      return rows.filter(r => r.some(cell => (cell||"").trim() !== ""));
+    }
+
+    function applyFromCSV(csvText){
+      const rows = parseCSV(csvText);
+      const svg = $container.querySelector("svg");
+      if (!svg) return;
+
+      // remove old inline unit-info
+      svg.querySelectorAll(".unit-info").forEach(n => n.remove());
+
+      // iterate rows 3..44 (index 2..43)
+      for (let idx = 2; idx <= 43 && idx < rows.length; idx++) {
+        const A = (rows[idx][0] || "").toString().trim(); // unit #
+        const B = (rows[idx][1] || "").toString().trim(); // area
+        const C = (rows[idx][2] || "").toString().trim(); // status text
+        if (!A) continue;
+        const unitNum = parseInt(A, 10);
+        if (isNaN(unitNum)) continue;
+
+        const id = "Shop-" + unitNum;
+        const el = svg.querySelector("#" + CSS.escape(id));
+        if (!el) { console.warn("Unit not found:", id); continue; }
+
+        const status = mapStatus(C);
+        const fill = (STATUS_COLORS[status] || STATUS_COLORS.Unavailable);
+
+        // Detect change: previous snapshot
+        const prev = prevState.get(id);
+        const currentLabel = buildLabel(unitNum, B, status);
+
+        // Apply color
+        colorUnit(el, status);
+
+        // Label
+        placeLabel(el, currentLabel);
+
+        // Glow if changed (status or label)
+        if (!prev || prev.status !== status || prev.label !== currentLabel) {
+          el.style.setProperty('--flash', fill);
+          el.classList.add('flash');
+          setTimeout(() => el.classList.remove('flash'), 1300);
+        }
+
+        // Save snapshot
+        prevState.set(id, { status, label: currentLabel });
+      }
+    }
+
+    function mapStatus(raw){
+      const t = (raw || "").toString().trim();
+      if (!t) return "Unavailable";
+      const k = t.toLowerCase();
+      if (k.includes("sold") || k.includes("مباع") || k.includes("مباعة")) return "Sold";
+      if (k.includes("available") || k.includes("متاح")) return "Available";
+      if (k.includes("reserved") || k.includes("حجز") || k.includes("محجوز")) return "Reserved";
+      if (k.includes("unavailable") || k.includes("غير")) return "Unavailable";
+      return "Unavailable";
+    }
+
+    function colorUnit(groupEl, status){
+      const fill = STATUS_COLORS[status] || STATUS_COLORS.Unavailable;
+      groupEl.setAttribute('data-status', status);
+      groupEl.querySelectorAll('rect, path, polygon, ellipse, circle').forEach(s => s.style.fill = fill);
+      groupEl.setAttribute('aria-label', groupEl.id + " — " + status);
+    }
+
+    function buildLabel(num, area, status){
+      const parts = [String(num)];
+      if (area) parts.push(area);
+      if (status) parts.push(status);
+      return parts.join(" — ");
+    }
+
+    function placeLabel(groupEl, textValue){
+      const rect = groupEl.querySelector('rect');
+      let x=0, y=0;
+      if (rect) {
+        const rx = parseFloat(rect.getAttribute('x')||0);
+        const ry = parseFloat(rect.getAttribute('y')||0);
+        const rw = parseFloat(rect.getAttribute('width')||0);
+        const rh = parseFloat(rect.getAttribute('height')||0);
+        x = rx + 6; y = ry + rh - 6;
+      } else {
+        const bb = groupEl.getBBox();
+        x = bb.x + 6; y = bb.y + bb.height - 6;
+      }
+      const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x', x);
+      t.setAttribute('y', y);
+      t.setAttribute('class', 'unit-info');
+      t.textContent = textValue;
+      groupEl.appendChild(t);
+    }
+  </script>
+</body>
+</html>
