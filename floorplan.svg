@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <svg xmlns="https://docs.google.com/spreadsheets/d/e/2PACX-1vSIDoeGG_tRxtzH8o-xH1ei6sBT-XkVYvF5Z1ftZPOpD0fabcTDU6OMHN_KIeydYArLA7UhktgiCVEM/pub?gid=1882100347&single=true&output=csv" viewBox="0 0 1200 900" width="1200" height="900" role="img" aria-label="Commercial Floorplan Availability Map">
   <style>
-    .unit { stroke:#222; stroke-width:2; cursor:pointer; transition:fill 0.15s ease; }
+    .unit { stroke:#222; stroke-width:2; cursor:pointer; transition:fill 0.10s ease; }
     .unit-label { font-family: Arial, sans-serif; font-size:12px; fill:#111; pointer-events:none; }
     .common-area { fill:none; stroke:#666; stroke-dasharray:4 4; }
   </style>
